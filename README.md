@@ -12,3 +12,4 @@
 2. `python generate_dataset.py`
 3. `hashcat -m 0 -a 0 sample_md5_hashes.txt mini_wordlist.txt`
 4. `hashcat -m 32300 -a 0 sample_argon2_hashes.txt mini_wordlist.txt`
+ 
