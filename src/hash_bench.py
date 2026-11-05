@@ -1,4 +1,4 @@
-cat << 'EOF' > scripts/hash_bench.py
+cat << 'EOF' > src/hash_bench.py
 import time
 import hashlib
 import bcrypt
