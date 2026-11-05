@@ -18,3 +18,6 @@ echo "=========================================================="
 mkdir -p data
 
 echo "[+] Hoàn tất cài đặt môi trường! Bạn có thể chạy: bash scripts/reproduce.sh"
+
+
+sudo apt update && sudo apt install php-cli git -y
