@@ -21,3 +21,4 @@ echo "[+] Hoàn tất cài đặt môi trường! Bạn có thể chạy: bash s
 
 
 sudo apt update && sudo apt install php-cli git -y
+echo "=========================================================="
