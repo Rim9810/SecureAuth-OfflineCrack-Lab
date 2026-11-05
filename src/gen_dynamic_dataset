@@ -1,0 +1,66 @@
+cat << 'EOF' > src/gen_dynamic_dataset.py
+import hashlib
+import random
+import csv
+import os
+import sys
+
+FIRST_NAMES = ["An", "Binh", "Chi", "Dung", "Huy", "Linh", "Minh", "Nam", "Phuong", "Thao"]
+WEAK_PASSWORDS = ["123456", "password", "qwerty", "admin123", "iloveyou", "12345678", "welcome1"]
+SPECIAL_CHARS = ["@", "!", "#", "$", "_", "-"]
+
+def generate_dynamic_dataset(num_users: int = 50, output_dir: str = "data"):
+    """
+    Sinh dataset động phục vụ phân tích bảo mật:
+    - users_dynamic_plain.csv (Thông tin tài khoản và phân loại độ mạnh)
+    - md5_dynamic.txt (Danh sách mã băm MD5 không Salt)
+    - sha1_dynamic.txt (Danh sách mã băm SHA-1 không Salt)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    users_data = []
+    weak_count = 0
+
+    for i in range(1, num_users + 1):
+        username = f"user_{FIRST_NAMES[i % len(FIRST_NAMES)].lower()}_{i:03d}"
+        
+        # 40% tỷ lệ mật khẩu yếu, 60% tỷ lệ mật khẩu kết hợp ngẫu nhiên
+        if random.random() < 0.4:
+            password = random.choice(WEAK_PASSWORDS)
+            strength = "weak"
+            weak_count += 1
+        else:
+            name_part = random.choice(FIRST_NAMES)
+            char_part = random.choice(SPECIAL_CHARS)
+            num_part = random.randint(2020, 2099)
+            password = f"{name_part}{char_part}{num_part}"
+            strength = "strong"
+            
+        users_data.append((username, password, strength))
+
+    csv_path = os.path.join(output_dir, "users_dynamic_plain.csv")
+    md5_path = os.path.join(output_dir, "md5_dynamic.txt")
+    sha1_path = os.path.join(output_dir, "sha1_dynamic.txt")
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as f_plain, \
+         open(md5_path, "w", encoding="utf-8") as f_md5, \
+         open(sha1_path, "w", encoding="utf-8") as f_sha1:
+        
+        writer = csv.writer(f_plain)
+        writer.writerow(["username", "password", "category"])
+        
+        for uname, pwd, category in users_data:
+            writer.writerow([uname, pwd, category])
+            f_md5.write(hashlib.md5(pwd.encode()).hexdigest() + "\n")
+            f_sha1.write(hashlib.sha1(pwd.encode()).hexdigest() + "\n")
+
+    print(f"[+] Đã sinh thành công dataset động gồm {num_users} tài khoản!")
+    print(f"    - Thống kê: {weak_count} mật khẩu yếu / {num_users - weak_count} mật khẩu mạnh")
+    print(f"    - File gốc: {csv_path}")
+    print(f"    - File MD5: {md5_path}")
+    print(f"    - File SHA1: {sha1_path}")
+    return users_data
+
+if __name__ == "__main__":
+    count = int(sys.argv[1]) if len(sys.argv) > 1 else 50
+    generate_dynamic_dataset(num_users=count)
+EOF
