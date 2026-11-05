@@ -1,4 +1,3 @@
-cat << 'EOF' > src/gen_dynamic_dataset.py
 import hashlib
 import random
 import csv
