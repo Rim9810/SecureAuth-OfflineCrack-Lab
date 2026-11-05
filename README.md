@@ -19,6 +19,5 @@ Tạo bảng Rainbow_table bằng công cụ knotty ( được viết bằng ng�
 
 1. git clone https://github.com/prodigiousMind/knotty.git
 2. cd knotty
-3. for i in $(cat plaintext-wordlists.txt); do php knotty.php plaintext=$i salt1= salt2= format=2 algo=md5; done > rainbow_table.txt
-   php -r '$f=fopen("plaintext-wordlists.txt","r"); while(($p=fgets($f))!==false){ $p=rtrim($p,"\r\n"); echo md5($p).":md5:".$p."\n"; } fclose($f);' > rainbow_table.txt
+3. for i in $(cat plaintext-wordlists.txt); do php knotty.php plaintext=$i salt1= salt2= format=2 algo=md5; done > rainbow_table.txt or ( php -r '$f=fopen("plaintext-wordlists.txt","r"); while(($p=fgets($f))!==false){ $p=rtrim($p,"\r\n"); echo md5($p).":md5:".$p."\n"; } fclose($f);' > rainbow_table.txt )
 4. grep -f database.txt rainbowtable.txt
