@@ -1,5 +1,7 @@
+cat << 'EOF' > src/gen_dynamic_dataset.py
 import hashlib
 import random
+import string
 import csv
 import os
 import sys
@@ -8,33 +10,41 @@ FIRST_NAMES = ["An", "Binh", "Chi", "Dung", "Huy", "Linh", "Minh", "Nam", "Phuon
 WEAK_PASSWORDS = ["123456", "password", "qwerty", "admin123", "iloveyou", "12345678", "welcome1"]
 SPECIAL_CHARS = ["@", "!", "#", "$", "_", "-"]
 
-def generate_dynamic_dataset(num_users: int = 50, output_dir: str = "data"):
+def generate_dynamic_dataset(num_users: int = 50, output_dir: str = "data", seed: int = 42):
     """
-    Sinh dataset động phục vụ phân tích bảo mật:
-    - users_dynamic_plain.csv (Thông tin tài khoản và phân loại độ mạnh)
-    - md5_dynamic.txt (Danh sách mã băm MD5 không Salt)
-    - sha1_dynamic.txt (Danh sách mã băm SHA-1 không Salt)
+    Sinh dataset động phục vụ phân tích bảo mật (CLO2 & CLO3):
+    - Đảm bảo tính tái lập (Reproducibility) qua tham số seed.
+    - Chia thành 3 nhóm độ mạnh: weak (từ điển), alphanum_6 (khớp bảng 1-6 ký tự), strong (phức tạp).
     """
+    random.seed(seed)
     os.makedirs(output_dir, exist_ok=True)
     users_data = []
-    weak_count = 0
+    stats = {"weak": 0, "alphanum_6": 0, "strong": 0}
+
+    alphanum_chars = string.ascii_letters + string.digits
 
     for i in range(1, num_users + 1):
         username = f"user_{FIRST_NAMES[i % len(FIRST_NAMES)].lower()}_{i:03d}"
-        
-        # 40% tỷ lệ mật khẩu yếu, 60% tỷ lệ mật khẩu kết hợp ngẫu nhiên
-        if random.random() < 0.4:
+        rand_val = random.random()
+
+        if rand_val < 0.4:
+            # 40%: Mật khẩu yếu phổ biến trong từ điển
             password = random.choice(WEAK_PASSWORDS)
-            strength = "weak"
-            weak_count += 1
+            category = "weak"
+        elif rand_val < 0.7:
+            # 30%: Mật khẩu chữ và số dài đúng 6 ký tự (khớp tập mixalpha-numeric 1-6)
+            password = "".join(random.choices(alphanum_chars, k=6))
+            category = "alphanum_6"
         else:
+            # 30%: Mật khẩu phức tạp có ký tự đặc biệt và độ dài lớn hơn 8
             name_part = random.choice(FIRST_NAMES)
             char_part = random.choice(SPECIAL_CHARS)
             num_part = random.randint(2020, 2099)
-            password = f"{name_part}{char_part}{num_part}"
-            strength = "strong"
-            
-        users_data.append((username, password, strength))
+            password = f"{name_part}{char_part}{num_part}!"
+            category = "strong"
+
+        stats[category] += 1
+        users_data.append((username, password, category))
 
     csv_path = os.path.join(output_dir, "users_dynamic_plain.csv")
     md5_path = os.path.join(output_dir, "md5_dynamic.txt")
@@ -52,10 +62,10 @@ def generate_dynamic_dataset(num_users: int = 50, output_dir: str = "data"):
             f_md5.write(hashlib.md5(pwd.encode()).hexdigest() + "\n")
             f_sha1.write(hashlib.sha1(pwd.encode()).hexdigest() + "\n")
 
-    print(f"[+] Đã sinh thành công dataset động gồm {num_users} tài khoản!")
-    print(f"    - Thống kê: {weak_count} mật khẩu yếu / {num_users - weak_count} mật khẩu mạnh")
-    print(f"    - File gốc: {csv_path}")
-    print(f"    - File MD5: {md5_path}")
+    print(f"[+] Đã sinh thành công dataset động gồm {num_users} tài khoản (Seed={seed})!")
+    print(f"    - Phân bổ: {stats['weak']} weak | {stats['alphanum_6']} alphanum_6 | {stats['strong']} strong")
+    print(f"    - File gốc:  {csv_path}")
+    print(f"    - File MD5:  {md5_path}")
     print(f"    - File SHA1: {sha1_path}")
     return users_data
 
