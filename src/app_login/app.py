@@ -2,6 +2,7 @@ import os
 import json
 import time
 import hmac
+import urllib.request
 import hashlib
 from flask import Flask, request, jsonify, render_template_string
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -148,11 +149,14 @@ def clear_failed_attempts(ip: str, username: str):
 
 
 # =====================================================================
-# KIỂM TRA MẬT KHẨU LỘ LỌT (HIBP K-ANONYMITY)
+# KIỂM TRA MẬT KHẨU LỘ LỌT (LOCAL + ONLINE HIBP K-ANONYMITY)
 # =====================================================================
 BREACHED_PASSWORDS = {
-    "123456", "password", "12345678", "123456789", "12345",
-    "qwerty", "qwerty123", "admin123", "iloveyou", "welcome123"
+    "123456", "password", "password123", "p@ssw0rd", "passw0rd",
+    "12345678", "123456789", "1234567890", "12345", "11111111",
+    "qwerty", "qwerty123", "qwertyuiop", "1q2w3e4r", "1qaz2wsx",
+    "admin123", "admin@123", "iloveyou", "iloveyou123", "welcome123",
+    "abc12345", "abcd1234", "matkhau123", "anhyeuem", "0123456789"
 }
 
 HIBP_INDEX = {}
@@ -161,10 +165,34 @@ for pwd in BREACHED_PASSWORDS:
     HIBP_INDEX.setdefault(sha1_hex[:5], set()).add(sha1_hex[5:])
 
 
-def is_password_pwned(password: str) -> bool:
-    sha1_full = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+def check_k_anonymity_hash(sha1_full: str) -> bool:
     prefix, suffix = sha1_full[:5], sha1_full[5:]
-    return suffix in HIBP_INDEX.get(prefix, set())
+
+    # 1. Kiểm tra trong bảng băm Local
+    if suffix in HIBP_INDEX.get(prefix, set()):
+        return True
+
+    # 2. Kiểm tra trên kho 800+ triệu mật khẩu của Have I Been Pwned qua k-Anonymity
+    try:
+        url = f"https://api.pwnedpasswords.com/range/{prefix}"
+        req = urllib.request.Request(url, headers={"User-Agent": "SecureLoginApp"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            for line in resp.read().decode("utf-8").splitlines():
+                returned_suffix = line.split(":")[0].strip()
+                if returned_suffix == suffix:
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
+def is_password_pwned(password: str) -> bool:
+    # Kiểm tra cả bản gốc (ví dụ: Password123) và bản viết thường (password123)
+    sha1_exact = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    sha1_lower = hashlib.sha1(password.lower().encode("utf-8")).hexdigest().upper()
+
+    return check_k_anonymity_hash(sha1_exact) or check_k_anonymity_hash(sha1_lower)
 
 
 # =====================================================================
