@@ -3,16 +3,38 @@ import json
 import time
 import hmac
 import hashlib
+import secrets
 from flask import Flask, request, jsonify, render_template_string
-from werkzeug.middleware.proxy_fix import ProxyFix
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import VerifyMismatchError
 
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-PEPPER_SECRET = os.environ.get("APP_PEPPER_SECRET", "secret_server_pepper_key_2026")
+# =====================================================================
+# 1. CẤU HÌNH PEPPER (256-BIT CSPRNG) & ARGON2ID LOCAL
+# =====================================================================
+PEPPER_FILE = "pepper.secret"
 DATASET_FILE = "users_dataset.json"
+BREACHED_FILE = "breached_passwords.txt"
+
+
+def load_or_create_pepper() -> str:
+    # Ưu tiên lấy từ biến môi trường nếu có, nếu không sẽ tự sinh và giữ cố định ở file pepper.secret
+    env_pepper = os.environ.get("APP_PEPPER_SECRET")
+    if env_pepper:
+        return env_pepper
+
+    if os.path.exists(PEPPER_FILE):
+        with open(PEPPER_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+
+    new_pepper = secrets.token_hex(32)  # 32 bytes = 256-bit
+    with open(PEPPER_FILE, "w", encoding="utf-8") as f:
+        f.write(new_pepper)
+    return new_pepper
+
+
+PEPPER_SECRET = load_or_create_pepper()
 
 ph = PasswordHasher(
     time_cost=3,
@@ -33,17 +55,14 @@ def apply_pepper(password: str) -> str:
 
 
 # =====================================================================
-# CƠ CHẾ DYNAMIC DATASET (LƯU TRONG RAM + FILE users_dataset.json)
+# 2. CƠ CHẾ DYNAMIC DATASET (LƯU TRONG RAM + FILE users_dataset.json)
 # =====================================================================
 DYNAMIC_DATASET = []
 
 
 def save_dataset():
-    try:
-        with open(DATASET_FILE, "w", encoding="utf-8") as f:
-            json.dump(DYNAMIC_DATASET, f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    with open(DATASET_FILE, "w", encoding="utf-8") as f:
+        json.dump(DYNAMIC_DATASET, f, ensure_ascii=False, indent=2)
 
 
 def load_dataset():
@@ -89,7 +108,7 @@ DUMMY_HASH = DYNAMIC_DATASET[0]["argon2_hash"]
 
 
 # =====================================================================
-# CƠ CHẾ RATE LIMIT: 5 LẦN SAI TRONG 3 PHÚT (180 GIÂY)
+# 3. CƠ CHẾ RATE LIMIT: TỐI ĐA 5 LẦN SAI TRONG 3 PHÚT (180 GIÂY)
 # =====================================================================
 MAX_FAILED_ATTEMPTS = 5
 RATE_LIMIT_WINDOW = 180
@@ -148,27 +167,55 @@ def clear_failed_attempts(ip: str, username: str):
 
 
 # =====================================================================
-# KIỂM TRA MẬT KHẨU LỘ LỌT (HIBP K-ANONYMITY)
+# 4. KIỂM TRA MẬT KHẨU LỘ LỌT LOCAL (HIBP K-ANONYMITY OFFLINE)
 # =====================================================================
-BREACHED_PASSWORDS = {
-    "123456", "password", "12345678", "123456789", "12345",
-    "qwerty", "qwerty123", "admin123", "iloveyou", "welcome123"
+DEFAULT_BREACHED = {
+    "123456", "password", "password123", "password1!", "p@ssw0rd", "passw0rd",
+    "12345678", "123456789", "1234567890", "12345", "11111111", "00000000",
+    "qwerty", "qwerty123", "qwertyuiop", "1q2w3e4r", "1qaz2wsx", "asdfghjkl",
+    "admin123", "admin@123", "root1234", "iloveyou", "iloveyou123", "welcome123",
+    "abc12345", "abcd1234", "matkhau123", "anhyeuem", "0123456789", "superman123"
 }
 
 HIBP_INDEX = {}
-for pwd in BREACHED_PASSWORDS:
-    sha1_hex = hashlib.sha1(pwd.encode("utf-8")).hexdigest().upper()
-    HIBP_INDEX.setdefault(sha1_hex[:5], set()).add(sha1_hex[5:])
 
 
-def is_password_pwned(password: str) -> bool:
-    sha1_full = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+def init_local_hibp_index():
+    words = set(DEFAULT_BREACHED)
+    # Nếu trong thư mục có thêm file breached_passwords.txt thì tự động nạp vào
+    if os.path.exists(BREACHED_FILE):
+        try:
+            with open(BREACHED_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    w = line.strip()
+                    if w:
+                        words.add(w)
+                        words.add(w.lower())
+        except OSError:
+            pass
+
+    for pwd in words:
+        sha1_hex = hashlib.sha1(pwd.encode("utf-8")).hexdigest().upper()
+        HIBP_INDEX.setdefault(sha1_hex[:5], set()).add(sha1_hex[5:])
+
+
+init_local_hibp_index()
+
+
+def check_k_anonymity_local(sha1_full: str) -> bool:
     prefix, suffix = sha1_full[:5], sha1_full[5:]
     return suffix in HIBP_INDEX.get(prefix, set())
 
 
+def is_password_pwned(password: str) -> bool:
+    # Kiểm tra cả bản gốc và bản viết thường qua chỉ mục k-Anonymity 5 ký tự đầu
+    sha1_exact = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    sha1_lower = hashlib.sha1(password.lower().encode("utf-8")).hexdigest().upper()
+    return check_k_anonymity_local(sha1_exact) or check_k_anonymity_local(sha1_lower)
+
+
 # =====================================================================
-# CÁC API ĐĂNG KÝ, ĐĂNG NHẬP & XEM DATASET NGẦM
+# 5. CÁC ENDPOINT API
 # =====================================================================
 @app.route("/api/register", methods=["POST"])
 def api_register():
@@ -266,6 +313,9 @@ def api_view_dataset():
     })
 
 
+# =====================================================================
+# 6. GIAO DIỆN ĐĂNG NHẬP / ĐĂNG KÝ
+# =====================================================================
 HTML_UI = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -635,5 +685,9 @@ def index():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    print("====================================================")
+    print(" Ứng dụng đang chạy Local tại: http://127.0.0.1:5000")
+    print(" Xem Dataset JSON tại:         http://127.0.0.1:5000/api/dataset")
+    print(" Tài khoản mặc định:           admin / AnToan@2026")
+    print("====================================================")
+    app.run(host="127.0.0.1", port=5000, debug=True)
