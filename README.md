@@ -13,11 +13,15 @@
 
 ---
 
-## 🔨 Hướng dẫn Demo Bẻ Khóa (Offline Cracking Lab)
+## 🔨 Hướng dẫn Demo Bẻ Khóa Bằng Từ Điển (Offline Dictionary Cracking Lab)
 
-Tạo bảng Rainbow_table bằng công cụ knotty ( được viết bằng ngôn ngữ php). Rồi so sánh dataset có chứa các mã băm thuật toán md5 bị rò rỉ với bảng rainbow_table được tạo từ hàng triệu mật khẩu đã được băm sang md5.
+Tạo từ điển mã băm (Precomputed Dictionary) bằng công cụ knotty (được viết bằng ngôn ngữ PHP). Sau đó, so sánh dataset có chứa các mã băm MD5 bị rò rỉ với từ điển mã băm vừa được tạo từ danh sách mật khẩu rõ để tìm ra mật khẩu gốc.
 
 1. git clone https://github.com/prodigiousMind/knotty.git
 2. cd knotty
-3. for i in $(cat plaintext-wordlists.txt); do php knotty.php plaintext=$i salt1= salt2= format=2 algo=md5; done > rainbow_table.txt or ( php -r '$f=fopen("plaintext-wordlists.txt","r"); while(($p=fgets($f))!==false){ $p=rtrim($p,"\r\n"); echo md5($p).":md5:".$p."\n"; } fclose($f);' > rainbow_table.txt )
-4. grep -f database.txt rainbowtable.txt
+3. Tạo file từ điển mã băm (chạy 1 trong 2 lệnh dưới đây):
+   - Cách 1 (Sử dụng script knotty):
+     for i in $(cat plaintext-wordlists.txt); do php knotty.php plaintext=$i salt1= salt2= format=2 algo=md5; done > hashed_wordlist.txt
+   - Cách 2 (Sử dụng lệnh PHP thuần):
+     php -r '$f=fopen("plaintext-wordlists.txt","r"); while(($p=fgets($f))!==false){ $p=rtrim($p,"\r\n"); echo md5($p).":md5:".$p."\n"; } fclose($f);' > hashed_wordlist.txt
+4. grep -w -f database.txt hashed_wordlist.txt
