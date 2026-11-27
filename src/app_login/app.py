@@ -3,39 +3,16 @@ import json
 import time
 import hmac
 import hashlib
-import secrets
-from flask import Flask, request, jsonify, render_template_string, session
+from flask import Flask, request, jsonify, render_template_string
+from werkzeug.middleware.proxy_fix import ProxyFix
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import VerifyMismatchError
 
 app = Flask(__name__)
-# Khóa bí mật dùng để ký cookie session của Flask
-app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-# =====================================================================
-# 1. CẤU HÌNH PEPPER (256-BIT CSPRNG) & ARGON2ID LOCAL
-# =====================================================================
-PEPPER_FILE = "pepper.secret"
+PEPPER_SECRET = os.environ.get("APP_PEPPER_SECRET", "secret_server_pepper_key_2026")
 DATASET_FILE = "users_dataset.json"
-BREACHED_FILE = "breached_passwords.txt"
-
-
-def load_or_create_pepper() -> str:
-    env_pepper = os.environ.get("APP_PEPPER_SECRET")
-    if env_pepper:
-        return env_pepper
-
-    if os.path.exists(PEPPER_FILE):
-        with open(PEPPER_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-
-    new_pepper = secrets.token_hex(32)  # 32 bytes = 256-bit
-    with open(PEPPER_FILE, "w", encoding="utf-8") as f:
-        f.write(new_pepper)
-    return new_pepper
-
-
-PEPPER_SECRET = load_or_create_pepper()
 
 ph = PasswordHasher(
     time_cost=3,
@@ -55,15 +32,22 @@ def apply_pepper(password: str) -> str:
     ).hexdigest()
 
 
+def hash_md5_for_dataset(password: str) -> str:
+    return hashlib.md5(password.encode("utf-8")).hexdigest()
+
+
 # =====================================================================
-# 2. CƠ CHẾ DYNAMIC DATASET (LƯU TRONG RAM + FILE users_dataset.json)
+# CƠ CHẾ DYNAMIC DATASET (LƯU TRONG RAM + FILE users_dataset.json)
 # =====================================================================
 DYNAMIC_DATASET = []
 
 
 def save_dataset():
-    with open(DATASET_FILE, "w", encoding="utf-8") as f:
-        json.dump(DYNAMIC_DATASET, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DATASET_FILE, "w", encoding="utf-8") as f:
+            json.dump(DYNAMIC_DATASET, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 
 def load_dataset():
@@ -80,6 +64,7 @@ def load_dataset():
             "id": 1,
             "username": "admin",
             "argon2_hash": ph.hash(apply_pepper("AnToan@2026")),
+            "md5_hash": hash_md5_for_dataset("AnToan@2026"),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
         })
         save_dataset()
@@ -97,6 +82,7 @@ def add_user_to_dataset(username: str, password: str):
         "id": len(DYNAMIC_DATASET) + 1,
         "username": username,
         "argon2_hash": ph.hash(apply_pepper(password)),
+        "md5_hash": hash_md5_for_dataset(password),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     DYNAMIC_DATASET.append(new_record)
@@ -109,7 +95,7 @@ DUMMY_HASH = DYNAMIC_DATASET[0]["argon2_hash"]
 
 
 # =====================================================================
-# 3. CƠ CHẾ RATE LIMIT: TỐI ĐA 5 LẦN SAI TRONG 3 PHÚT (180 GIÂY)
+# CƠ CHẾ RATE LIMIT: 5 LẦN SAI TRONG 3 PHÚT (180 GIÂY)
 # =====================================================================
 MAX_FAILED_ATTEMPTS = 5
 RATE_LIMIT_WINDOW = 180
@@ -168,41 +154,23 @@ def clear_failed_attempts(ip: str, username: str):
 
 
 # =====================================================================
-# 4. KIỂM TRA MẬT KHẨU LỘ LỌT LOCAL (HIBP K-ANONYMITY OFFLINE)
+# KIỂM TRA MẬT KHẨU LỘ LỌT LOCAL (K-ANONYMITY OFFLINE)
 # =====================================================================
-DEFAULT_BREACHED = {
-    "123456", "password", "password123", "password1!", "p@ssw0rd", "passw0rd",
-    "12345678", "123456789", "1234567890", "12345", "11111111", "00000000",
-    "qwerty", "qwerty123", "qwertyuiop", "1q2w3e4r", "1qaz2wsx", "asdfghjkl",
-    "admin123", "admin@123", "root1234", "iloveyou", "iloveyou123", "welcome123",
-    "abc12345", "abcd1234", "matkhau123", "anhyeuem", "0123456789", "superman123"
+BREACHED_PASSWORDS = {
+    "123456", "password", "password123", "p@ssw0rd", "passw0rd",
+    "12345678", "123456789", "1234567890", "12345", "11111111",
+    "qwerty", "qwerty123", "qwertyuiop", "1q2w3e4r", "1qaz2wsx",
+    "admin123", "admin@123", "iloveyou", "iloveyou123", "welcome123",
+    "abc12345", "abcd1234", "matkhau123", "anhyeuem", "0123456789"
 }
 
 HIBP_INDEX = {}
+for pwd in BREACHED_PASSWORDS:
+    sha1_hex = hashlib.sha1(pwd.encode("utf-8")).hexdigest().upper()
+    HIBP_INDEX.setdefault(sha1_hex[:5], set()).add(sha1_hex[5:])
 
 
-def init_local_hibp_index():
-    words = set(DEFAULT_BREACHED)
-    if os.path.exists(BREACHED_FILE):
-        try:
-            with open(BREACHED_FILE, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    w = line.strip()
-                    if w:
-                        words.add(w)
-                        words.add(w.lower())
-        except OSError:
-            pass
-
-    for pwd in words:
-        sha1_hex = hashlib.sha1(pwd.encode("utf-8")).hexdigest().upper()
-        HIBP_INDEX.setdefault(sha1_hex[:5], set()).add(sha1_hex[5:])
-
-
-init_local_hibp_index()
-
-
-def check_k_anonymity_local(sha1_full: str) -> bool:
+def check_k_anonymity_hash(sha1_full: str) -> bool:
     prefix, suffix = sha1_full[:5], sha1_full[5:]
     return suffix in HIBP_INDEX.get(prefix, set())
 
@@ -210,11 +178,12 @@ def check_k_anonymity_local(sha1_full: str) -> bool:
 def is_password_pwned(password: str) -> bool:
     sha1_exact = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
     sha1_lower = hashlib.sha1(password.lower().encode("utf-8")).hexdigest().upper()
-    return check_k_anonymity_local(sha1_exact) or check_k_anonymity_local(sha1_lower)
+
+    return check_k_anonymity_hash(sha1_exact) or check_k_anonymity_hash(sha1_lower)
 
 
 # =====================================================================
-# 5. CÁC ENDPOINT API
+# CÁC API ĐĂNG KÝ, ĐĂNG NHẬP & XEM DATASET NGẦM
 # =====================================================================
 @app.route("/api/register", methods=["POST"])
 def api_register():
@@ -286,16 +255,9 @@ def api_login():
     try:
         ph.verify(user_record["argon2_hash"], apply_pepper(password))
         clear_failed_attempts(client_ip, user_record["username"])
-
-        # Lưu thông tin đăng nhập và quyền hạn vào Session
-        is_admin = (user_record["username"].lower() == "admin")
-        session["username"] = user_record["username"]
-        session["is_admin"] = is_admin
-
         return jsonify({
             "message": "Đăng nhập thành công!",
-            "username": user_record["username"],
-            "is_admin": is_admin
+            "username": user_record["username"]
         })
     except VerifyMismatchError:
         remaining, lock_sec = record_failed_attempt(client_ip, user_record["username"])
@@ -310,20 +272,8 @@ def api_login():
         }), 401
 
 
-@app.route("/api/logout", methods=["POST"])
-def api_logout():
-    session.clear()
-    return jsonify({"message": "Đã đăng xuất."})
-
-
 @app.route("/api/dataset", methods=["GET"])
 def api_view_dataset():
-    # Chặn truy cập nếu chưa đăng nhập hoặc không phải tài khoản admin
-    if not session.get("is_admin"):
-        return jsonify({
-            "error": "Truy cập bị từ chối! Chỉ tài khoản quản trị viên (admin) mới có quyền xem danh sách và mã hash."
-        }), 403
-
     return jsonify({
         "storage_file": DATASET_FILE,
         "total_accounts": len(DYNAMIC_DATASET),
@@ -331,9 +281,6 @@ def api_view_dataset():
     })
 
 
-# =====================================================================
-# 6. GIAO DIỆN ĐĂNG NHẬP / ĐĂNG KÝ / ADMIN DASHBOARD
-# =====================================================================
 HTML_UI = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -351,7 +298,7 @@ HTML_UI = """
       justify-content: center;
       background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
       color: #1e293b;
-      padding: 20px;
+      padding: 16px;
     }
     .auth-card {
       background: #ffffff;
@@ -360,11 +307,6 @@ HTML_UI = """
       padding: 36px 32px;
       border-radius: 16px;
       box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
-      transition: max-width 0.3s ease;
-    }
-    /* Mở rộng card khi Admin xem bảng danh sách user & hash */
-    .auth-card.admin-mode {
-      max-width: 960px;
     }
     .auth-header {
       text-align: center;
@@ -461,7 +403,7 @@ HTML_UI = """
       border: 1px solid #bbf7d0;
     }
     .hidden {
-      display: none !important;
+      display: none;
     }
     .welcome-box {
       text-align: center;
@@ -480,29 +422,8 @@ HTML_UI = """
       font-weight: 700;
       margin: 0 auto 16px auto;
     }
-    .role-badge {
-      display: inline-block;
-      margin-top: 8px;
-      padding: 4px 12px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .role-admin {
-      background: #fef3c7;
-      color: #b45309;
-      border: 1px solid #fde68a;
-    }
-    .role-user {
-      background: #e0f2fe;
-      color: #0369a1;
-      border: 1px solid #bae6fd;
-    }
     .btn-outline {
       width: 100%;
-      max-width: 240px;
       padding: 11px;
       font-size: 14.5px;
       font-weight: 600;
@@ -511,113 +432,19 @@ HTML_UI = """
       border: 1px solid #cbd5e1;
       border-radius: 8px;
       cursor: pointer;
-      margin-top: 22px;
+      margin-top: 20px;
     }
     .btn-outline:hover {
       background: #f1f5f9;
-    }
-
-    /* CSS cho bảng Admin Panel */
-    .admin-panel {
-      margin-top: 26px;
-      padding-top: 22px;
-      border-top: 1px solid #e2e8f0;
-      text-align: left;
-    }
-    .admin-panel-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 14px;
-    }
-    .admin-panel-header h3 {
-      margin: 0;
-      font-size: 16px;
-      color: #0f172a;
-    }
-    .btn-refresh {
-      padding: 6px 12px;
-      font-size: 13px;
-      font-weight: 600;
-      color: #2563eb;
-      background: #eff6ff;
-      border: 1px solid #bfdbfe;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    .btn-refresh:hover {
-      background: #dbeafe;
-    }
-    .table-wrapper {
-      overflow-x: auto;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13.5px;
-    }
-    th {
-      background: #f8fafc;
-      color: #475569;
-      font-weight: 600;
-      text-align: left;
-      padding: 11px 14px;
-      border-bottom: 1px solid #e2e8f0;
-      white-space: nowrap;
-    }
-    td {
-      padding: 11px 14px;
-      border-bottom: 1px solid #f1f5f9;
-      vertical-align: middle;
-    }
-    tr:last-child td {
-      border-bottom: none;
-    }
-    tr:hover td {
-      background: #f8fafc;
-    }
-    .hash-cell {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .hash-code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 12px;
-      background: #f1f5f9;
-      color: #0f172a;
-      padding: 5px 8px;
-      border-radius: 6px;
-      word-break: break-all;
-      line-height: 1.4;
-    }
-    .btn-copy {
-      flex-shrink: 0;
-      padding: 5px 9px;
-      font-size: 12px;
-      font-weight: 600;
-      color: #334155;
-      background: #ffffff;
-      border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    .btn-copy:hover {
-      background: #f1f5f9;
-      border-color: #94a3b8;
     }
   </style>
 </head>
 <body>
 
-  <div id="main-card" class="auth-card">
+  <div class="auth-card">
     <div id="alert-box" class="alert"></div>
 
-    <!-- VIEW: ĐĂNG NHẬP -->
+    <!-- MÀN HÌNH 1: ĐĂNG NHẬP (HIỂN THỊ MẶC ĐỊNH) -->
     <div id="view-login">
       <div class="auth-header">
         <h1>Đăng nhập</h1>
@@ -641,7 +468,7 @@ HTML_UI = """
       </div>
     </div>
 
-    <!-- VIEW: ĐĂNG KÝ -->
+    <!-- MÀN HÌNH 2: ĐĂNG KÝ TÀI KHOẢN -->
     <div id="view-register" class="hidden">
       <div class="auth-header">
         <h1>Tạo tài khoản mới</h1>
@@ -669,37 +496,12 @@ HTML_UI = """
       </div>
     </div>
 
-    <!-- VIEW: DASHBOARD SAU KHI ĐĂNG NHẬP -->
+    <!-- MÀN HÌNH 3: TRANG CHỦ SAU KHI ĐĂNG NHẬP -->
     <div id="view-dashboard" class="hidden">
       <div class="welcome-box">
         <div class="avatar-circle" id="user-avatar">U</div>
         <h2 style="margin:0 0 6px 0; color:#0f172a;">Xin chào, <span id="display-username"></span>!</h2>
         <p style="margin:0; font-size:14px; color:#64748b;">Bạn đã đăng nhập vào hệ thống thành công.</p>
-        <div id="user-role-badge"></div>
-
-        <!-- KHU VỰC CHỈ HIỂN THỊ CHO ADMIN -->
-        <div id="admin-panel" class="admin-panel hidden">
-          <div class="admin-panel-header">
-            <h3>Danh sách tài khoản & Mã Hash Argon2id (<span id="total-users">0</span>)</h3>
-            <button type="button" class="btn-refresh" onclick="loadAdminUsers()">↻ Làm mới</button>
-          </div>
-          <div class="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Tên đăng nhập</th>
-                  <th>Ngày tạo</th>
-                  <th>Mã Hash (Argon2id + Pepper)</th>
-                </tr>
-              </thead>
-              <tbody id="users-table-body">
-                <!-- Dữ liệu được render bởi JS -->
-              </tbody>
-            </table>
-          </div>
-        </div>
-
         <button class="btn-outline" onclick="handleLogout()">Đăng xuất</button>
       </div>
     </div>
@@ -717,69 +519,6 @@ HTML_UI = """
 
   function hideAlert() {
     document.getElementById("alert-box").style.display = "none";
-  }
-
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-  function copyHash(btn, hashText) {
-    navigator.clipboard.writeText(hashText).then(() => {
-      const original = btn.textContent;
-      btn.textContent = "Đã chép!";
-      btn.style.color = "#15803d";
-      btn.style.borderColor = "#86efac";
-      setTimeout(() => {
-        btn.textContent = original;
-        btn.style.color = "";
-        btn.style.borderColor = "";
-      }, 1500);
-    });
-  }
-
-  async function loadAdminUsers() {
-    const tbody = document.getElementById("users-table-body");
-    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#64748b;">Đang tải dữ liệu...</td></tr>';
-
-    try {
-      const res = await fetch("/api/dataset");
-      const data = await res.json();
-
-      if (!res.ok) {
-        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:#b91c1c;">${escapeHtml(data.error || "Lỗi tải dữ liệu")}</td></tr>`;
-        return;
-      }
-
-      document.getElementById("total-users").textContent = data.total_accounts;
-      tbody.innerHTML = "";
-
-      data.accounts.forEach(acc => {
-        const tr = document.createElement("tr");
-        const isAccAdmin = acc.username.toLowerCase() === "admin";
-        const userLabel = isAccAdmin
-          ? `<strong>${escapeHtml(acc.username)}</strong> <span style="font-size:11px; color:#b45309; background:#fef3c7; padding:2px 6px; border-radius:4px;">ADMIN</span>`
-          : `<strong>${escapeHtml(acc.username)}</strong>`;
-
-        tr.innerHTML = `
-          <td>#${acc.id}</td>
-          <td style="white-space:nowrap;">${userLabel}</td>
-          <td style="white-space:nowrap; color:#64748b;">${escapeHtml(acc.created_at || "-")}</td>
-          <td>
-            <div class="hash-cell">
-              <code class="hash-code">${escapeHtml(acc.argon2_hash)}</code>
-              <button type="button" class="btn-copy" onclick="copyHash(this, '${escapeHtml(acc.argon2_hash)}')">Copy</button>
-            </div>
-          </td>
-        `;
-        tbody.appendChild(tr);
-      });
-    } catch (err) {
-      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#b91c1c;">Không thể kết nối đến máy chủ.</td></tr>';
-    }
   }
 
   function startLockoutCountdown(seconds) {
@@ -817,11 +556,6 @@ HTML_UI = """
     document.getElementById("view-login").classList.toggle("hidden", tab !== "login");
     document.getElementById("view-register").classList.toggle("hidden", tab !== "register");
     document.getElementById("view-dashboard").classList.toggle("hidden", tab !== "dashboard");
-
-    if (tab !== "dashboard") {
-      document.getElementById("main-card").classList.remove("admin-mode");
-      document.getElementById("admin-panel").classList.add("hidden");
-    }
   }
 
   async function handleLogin(e) {
@@ -855,22 +589,6 @@ HTML_UI = """
         document.getElementById("display-username").textContent = data.username;
         document.getElementById("user-avatar").textContent = data.username.charAt(0).toUpperCase();
         document.getElementById("login-password").value = "";
-
-        const roleBadge = document.getElementById("user-role-badge");
-        const adminPanel = document.getElementById("admin-panel");
-        const mainCard = document.getElementById("main-card");
-
-        if (data.is_admin) {
-          roleBadge.innerHTML = '<span class="role-badge role-admin">Quản trị viên (Admin)</span>';
-          mainCard.classList.add("admin-mode");
-          adminPanel.classList.remove("hidden");
-          loadAdminUsers();
-        } else {
-          roleBadge.innerHTML = '<span class="role-badge role-user">Người dùng (User)</span>';
-          mainCard.classList.remove("admin-mode");
-          adminPanel.classList.add("hidden");
-        }
-
         switchTab("dashboard");
       }
     } catch (err) {
@@ -920,11 +638,7 @@ HTML_UI = """
     }
   }
 
-  async function handleLogout() {
-    try {
-      await fetch("/api/logout", { method: "POST" });
-    } catch (err) {}
-    document.getElementById("users-table-body").innerHTML = "";
+  function handleLogout() {
     switchTab("login");
   }
 </script>
@@ -939,8 +653,5 @@ def index():
 
 
 if __name__ == "__main__":
-    print("====================================================")
-    print(" Ứng dụng đang chạy Local tại: http://127.0.0.1:5000")
-    print(" Tài khoản mặc định:           admin / AnToan@2026")
-    print("====================================================")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
